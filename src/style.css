@@ -1,0 +1,319 @@
+:root {
+  --panel-opacity: 0.92;
+  --panel-bg: rgb(13 17 23 / var(--panel-opacity));
+  --panel-edge: rgba(0, 0, 0, 0.55);
+  --text-main: #f4f7fb;
+  --text-muted: #aeb7c5;
+  --accent: #7dd3fc;
+  --danger: #ff6868;
+  --font-mono: ui-monospace, Consolas, 'Liberation Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  color: var(--text-main);
+  font-family: var(--font-mono);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+}
+
+#app {
+  width: 100%;
+  height: 100vh;
+  background: transparent;
+}
+
+.float-panel {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 12px 34px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  background: var(--panel-bg);
+  cursor: move;
+}
+
+.close-button {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
+  cursor: pointer;
+  font: 700 13px/1 var(--font-mono);
+}
+
+.close-button:hover {
+  background: rgba(255, 88, 88, 0.9);
+  color: #ffffff;
+}
+
+.usage-line {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-main);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.usage-button {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.1;
+  padding: 3px 5px;
+}
+
+.usage-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.usage-button.selected {
+  border-color: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.process-list {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+}
+
+.process-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 50px 50px 50px;
+  gap: 5px;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.process-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-usage {
+  color: var(--text-main);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.settings-panel {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  background: rgb(13 17 23 / 0.96);
+  color: var(--text-main);
+  display: flex;
+  flex-direction: column;
+  cursor: move;
+}
+
+.settings-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.settings-content::-webkit-scrollbar-track {
+  margin: 4px 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.settings-content::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(13, 17, 23, 0.96);
+  border-radius: 999px;
+  background: rgba(125, 211, 252, 0.58);
+}
+
+.settings-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(125, 211, 252, 0.78);
+}
+
+.settings-header {
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 48px;
+  padding: 14px 14px 8px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgb(13 17 23 / 0.98);
+}
+
+.settings-header h1 {
+  font-size: 18px;
+  line-height: 1.2;
+  font-weight: 800;
+}
+
+.settings-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 14px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.settings-description {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.settings-close {
+  position: static;
+  flex: 0 0 auto;
+}
+
+.opacity-control {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.opacity-label-row,
+.opacity-input-row,
+.settings-actions {
+  display: flex;
+  align-items: center;
+}
+
+.opacity-label-row {
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.opacity-label-row strong {
+  color: var(--text-main);
+  font-size: 20px;
+}
+
+.opacity-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.opacity-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.opacity-slider::-webkit-slider-thumb {
+  margin-top: -5px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #d8f5ff;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 3px 10px rgba(125, 211, 252, 0.38);
+}
+
+.opacity-input-row {
+  justify-content: flex-end;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.opacity-number {
+  width: 76px;
+  height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main);
+  font: 700 13px/1 var(--font-mono);
+  padding: 0 9px;
+}
+
+.settings-actions {
+  flex: 0 0 auto;
+  padding-top: 2px;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-status {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.apply-button {
+  min-width: 86px;
+  height: 34px;
+  border: 1px solid rgba(125, 211, 252, 0.45);
+  border-radius: 11px;
+  background: rgba(125, 211, 252, 0.15);
+  color: var(--text-main);
+  cursor: pointer;
+  font: 800 13px/1 var(--font-mono);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.apply-button:hover {
+  background: rgba(125, 211, 252, 0.23);
+}
+
+.apply-button:active {
+  transform: translateY(1px);
+}

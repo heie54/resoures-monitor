@@ -1,0 +1,15 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

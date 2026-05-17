@@ -1,0 +1,16 @@
+{
+  "identifier": "default",
+  "description": "Window controls used by the floating monitor.",
+  "windows": ["main", "settings"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-current-monitor",
+    "core:window:allow-hide",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-set-position",
+    "core:window:allow-start-dragging"
+  ]
+}

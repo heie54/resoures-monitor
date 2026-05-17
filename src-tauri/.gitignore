@@ -1,0 +1,31 @@
+# Rust/Tauri build artifacts
+target/
+
+# Debug and release builds
+debug/
+release/
+
+# Cargo lock (optional, can be committed)
+# Cargo.lock
+
+# Build artifacts from Tauri
+.src/
+.gen/
+
+# Backup files
+*.bak
+*.old
+
+# IDE
+.vscode/
+.idea/
+*.rs.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tauri special
+# The src-tauri/tauri.conf.json contains sensitive config
+# Uncomment below if you want to ignore it
+# tauri.conf.json
