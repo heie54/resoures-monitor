@@ -5,7 +5,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "powershell -NoProfile -Command \"Remove-Item Env:TAURI_PLATFORM -ErrorAction SilentlyContinue; npm run build\""
   },
   "app": {
     "windows": [

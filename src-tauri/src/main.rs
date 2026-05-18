@@ -3,8 +3,10 @@
     windows_subsystem = "windows"
 )]
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use sysinfo::{CpuExt, PidExt, ProcessExt, System, SystemExt};
 use tauri::image::Image;
@@ -13,6 +15,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const APP_NAME: &str = "Resource Monitor";
+const APPEARANCE_CONFIG_FILE: &str = "appearance.json";
 
 #[derive(Serialize, Clone)]
 struct ProcessInfo {
@@ -35,14 +38,42 @@ struct SystemInfo {
 
 struct AppState {
     system: Mutex<System>,
+    cpu: Mutex<CpuSampler>,
     gpu: Mutex<GpuSampler>,
     opacity_percent: Mutex<u8>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct AppearanceConfig {
+    opacity: u8,
+    border_radius: u8,
+    theme_mode: String,
+    accent_color: String,
+    font_size: String,
+    background_blur: bool,
+    animations: bool,
+    window_shadow: bool,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppearanceConfigPatch {
+    opacity: Option<u8>,
+    border_radius: Option<u8>,
+    theme_mode: Option<String>,
+    accent_color: Option<String>,
+    font_size: Option<String>,
+    background_blur: Option<bool>,
+    animations: Option<bool>,
+    window_shadow: Option<bool>,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
             system: Mutex::new(System::new()),
+            cpu: Mutex::new(CpuSampler::new()),
             gpu: Mutex::new(GpuSampler::new()),
             opacity_percent: Mutex::new(92),
         }
@@ -102,6 +133,30 @@ fn apply_window_opacity(
 }
 
 #[tauri::command]
+fn get_appearance_config(app: AppHandle) -> Result<AppearanceConfig, String> {
+    read_appearance_config(&app)
+}
+
+#[tauri::command]
+fn save_appearance_config(
+    app: AppHandle,
+    config: AppearanceConfig,
+) -> Result<AppearanceConfig, String> {
+    let config = config.sanitized();
+    write_appearance_config(&app, &config)?;
+    let _ = app.emit("appearance-changed", config.clone());
+    Ok(config)
+}
+
+#[tauri::command]
+fn reset_appearance_config(app: AppHandle) -> Result<AppearanceConfig, String> {
+    let config = default_appearance_config();
+    write_appearance_config(&app, &config)?;
+    let _ = app.emit("appearance-changed", config.clone());
+    Ok(config)
+}
+
+#[tauri::command]
 fn get_system_info(state: State<AppState>) -> Result<SystemInfo, String> {
     state.refresh();
 
@@ -112,10 +167,16 @@ fn get_system_info(state: State<AppState>) -> Result<SystemInfo, String> {
         .unwrap_or_default();
 
     let system = state.system.lock().map_err(|e| e.to_string())?;
-    let cpu_percent = system.global_cpu_info().cpu_usage();
+    let fallback_cpu_percent = system.global_cpu_info().cpu_usage();
+    let cpu_percent = state
+        .cpu
+        .lock()
+        .ok()
+        .and_then(|mut cpu| cpu.sample())
+        .unwrap_or(fallback_cpu_percent);
     let cpu_count = system.cpus().len().max(1) as f32;
-    let total_memory = system.total_memory().max(1) as f32;
-    let memory_percent = ((system.used_memory() as f32 / total_memory) * 100.0).clamp(0.0, 100.0);
+    let total_memory = system.total_memory();
+    let memory_percent = memory_usage_percent(total_memory, system.available_memory());
 
     let mut processes: Vec<ProcessInfo> = system
         .processes()
@@ -128,8 +189,7 @@ fn get_system_info(state: State<AppState>) -> Result<SystemInfo, String> {
                 .copied()
                 .unwrap_or(0.0)
                 .clamp(0.0, gpu_sample.total);
-            let process_memory_percent =
-                ((process.memory() as f32 / total_memory) * 100.0).clamp(0.0, 100.0);
+            let process_memory_percent = memory_share_percent(process.memory(), total_memory);
 
             ProcessInfo {
                 name: process.name().to_string(),
@@ -141,11 +201,7 @@ fn get_system_info(state: State<AppState>) -> Result<SystemInfo, String> {
         })
         .collect();
 
-    processes.sort_by(|a, b| {
-        b.cpu_percent
-            .partial_cmp(&a.cpu_percent)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    processes.sort_by(compare_by_resource_score);
     let top_processes = processes.iter().take(5).cloned().collect();
 
     let mut gpu_processes = processes.clone();
@@ -209,7 +265,8 @@ fn show_settings(app: &AppHandle) -> Result<(), String> {
         )
         .title("Resource Monitor Settings")
         .inner_size(SETTINGS_WIDTH, SETTINGS_HEIGHT)
-        .resizable(false)
+        .min_inner_size(SETTINGS_WIDTH, SETTINGS_HEIGHT)
+        .resizable(true)
         .decorations(false)
         .transparent(true)
         .shadow(false)
@@ -308,6 +365,275 @@ struct GpuSample {
     by_pid: HashMap<u32, f32>,
 }
 
+fn percent(part: u64, total: u64) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    ((part as f32 / total as f32) * 100.0).clamp(0.0, 100.0)
+}
+
+fn memory_usage_percent(total_memory: u64, available_memory: u64) -> f32 {
+    percent(total_memory.saturating_sub(available_memory), total_memory)
+}
+
+fn memory_share_percent(process_memory: u64, total_memory: u64) -> f32 {
+    percent(process_memory, total_memory)
+}
+
+fn default_appearance_config() -> AppearanceConfig {
+    AppearanceConfig {
+        opacity: 92,
+        border_radius: 12,
+        theme_mode: "system".to_string(),
+        accent_color: "#7dd3fc".to_string(),
+        font_size: "medium".to_string(),
+        background_blur: true,
+        animations: true,
+        window_shadow: false,
+    }
+}
+
+impl AppearanceConfig {
+    fn sanitized(self) -> Self {
+        let defaults = default_appearance_config();
+
+        Self {
+            opacity: self.opacity.clamp(40, 100),
+            border_radius: self.border_radius.clamp(0, 32),
+            theme_mode: sanitize_choice(&self.theme_mode, &["system", "light", "dark"])
+                .unwrap_or(defaults.theme_mode),
+            accent_color: if is_valid_hex_color(&self.accent_color) {
+                self.accent_color
+            } else {
+                defaults.accent_color
+            },
+            font_size: sanitize_choice(&self.font_size, &["small", "medium", "large"])
+                .unwrap_or(defaults.font_size),
+            background_blur: self.background_blur,
+            animations: self.animations,
+            window_shadow: self.window_shadow,
+        }
+    }
+}
+
+impl AppearanceConfigPatch {
+    fn into_config(self) -> AppearanceConfig {
+        let defaults = default_appearance_config();
+
+        AppearanceConfig {
+            opacity: self.opacity.unwrap_or(defaults.opacity),
+            border_radius: self.border_radius.unwrap_or(defaults.border_radius),
+            theme_mode: self.theme_mode.unwrap_or(defaults.theme_mode),
+            accent_color: self.accent_color.unwrap_or(defaults.accent_color),
+            font_size: self.font_size.unwrap_or(defaults.font_size),
+            background_blur: self.background_blur.unwrap_or(defaults.background_blur),
+            animations: self.animations.unwrap_or(defaults.animations),
+            window_shadow: self.window_shadow.unwrap_or(defaults.window_shadow),
+        }
+        .sanitized()
+    }
+}
+
+fn appearance_config_from_json(content: &str) -> AppearanceConfig {
+    serde_json::from_str::<AppearanceConfigPatch>(content)
+        .map(|config| config.into_config())
+        .unwrap_or_else(|_| default_appearance_config())
+}
+
+fn sanitize_choice(value: &str, allowed: &[&str]) -> Option<String> {
+    allowed
+        .iter()
+        .find(|allowed_value| **allowed_value == value)
+        .map(|value| (*value).to_string())
+}
+
+fn is_valid_hex_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value.chars().skip(1).all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn appearance_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join(APPEARANCE_CONFIG_FILE))
+        .map_err(|e| e.to_string())
+}
+
+fn read_appearance_config(app: &AppHandle) -> Result<AppearanceConfig, String> {
+    let path = appearance_config_path(app)?;
+
+    if !path.exists() {
+        return Ok(default_appearance_config());
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    Ok(appearance_config_from_json(&content))
+}
+
+fn write_appearance_config(app: &AppHandle, config: &AppearanceConfig) -> Result<(), String> {
+    let path = appearance_config_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())
+}
+
+fn resource_score(cpu_percent: f32, memory_percent: f32, gpu_percent: f32) -> f32 {
+    let cpu_percent = cpu_percent.clamp(0.0, 100.0);
+    let memory_percent = memory_percent.clamp(0.0, 100.0);
+    let gpu_percent = gpu_percent.clamp(0.0, 100.0);
+    let weighted_score = cpu_percent * 0.45 + memory_percent * 0.25 + gpu_percent * 0.3;
+    let bottleneck_score = cpu_percent.max(memory_percent).max(gpu_percent);
+
+    weighted_score * 0.6 + bottleneck_score * 0.4
+}
+
+fn compare_by_resource_score(a: &ProcessInfo, b: &ProcessInfo) -> std::cmp::Ordering {
+    resource_score(b.cpu_percent, b.memory_percent, b.gpu_percent)
+        .partial_cmp(&resource_score(
+            a.cpu_percent,
+            a.memory_percent,
+            a.gpu_percent,
+        ))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            b.cpu_percent
+                .partial_cmp(&a.cpu_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+fn record_gpu_engine_usage(
+    by_pid: &mut HashMap<u32, f32>,
+    pid: Option<u32>,
+    percent: f32,
+    total: &mut f32,
+) {
+    let percent = percent.clamp(0.0, 100.0);
+    *total = (*total).max(percent);
+
+    if let Some(pid) = pid {
+        let entry = by_pid.entry(pid).or_insert(0.0);
+        *entry = (*entry).max(percent);
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct CpuSampler {
+    query: isize,
+    counter: isize,
+    available: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl CpuSampler {
+    fn new() -> Self {
+        let mut sampler = Self {
+            query: 0,
+            counter: 0,
+            available: false,
+        };
+
+        unsafe {
+            if pdh::PdhOpenQueryW(std::ptr::null(), 0, &mut sampler.query) != pdh::ERROR_SUCCESS {
+                return sampler;
+            }
+
+            let paths = [
+                r"\Processor Information(_Total)\% Processor Utility",
+                r"\Processor(_Total)\% Processor Time",
+            ];
+
+            for path in paths {
+                let path = wide(path);
+                if pdh::PdhAddEnglishCounterW(
+                    sampler.query,
+                    path.as_ptr(),
+                    0,
+                    &mut sampler.counter,
+                ) == pdh::ERROR_SUCCESS
+                {
+                    sampler.available =
+                        pdh::PdhCollectQueryData(sampler.query) == pdh::ERROR_SUCCESS;
+                    break;
+                }
+            }
+
+            if !sampler.available {
+                pdh::PdhCloseQuery(sampler.query);
+                sampler.query = 0;
+                sampler.counter = 0;
+            }
+        }
+
+        sampler
+    }
+
+    fn sample(&mut self) -> Option<f32> {
+        if !self.available {
+            return None;
+        }
+
+        unsafe {
+            if pdh::PdhCollectQueryData(self.query) != pdh::ERROR_SUCCESS {
+                return None;
+            }
+
+            let mut value = pdh::PdhFmtCountervalue {
+                c_status: 0,
+                value: pdh::PdhFmtValue { double_value: 0.0 },
+            };
+
+            let status = pdh::PdhGetFormattedCounterValue(
+                self.counter,
+                pdh::PDH_FMT_DOUBLE,
+                std::ptr::null_mut(),
+                &mut value,
+            );
+
+            if status != pdh::ERROR_SUCCESS || value.c_status != pdh::ERROR_SUCCESS as u32 {
+                return None;
+            }
+
+            let value = value.value.double_value;
+            if value.is_finite() {
+                Some((value as f32).clamp(0.0, 100.0))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for CpuSampler {
+    fn drop(&mut self) {
+        if self.query != 0 {
+            unsafe {
+                pdh::PdhCloseQuery(self.query);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+struct CpuSampler;
+
+#[cfg(not(target_os = "windows"))]
+impl CpuSampler {
+    fn new() -> Self {
+        Self
+    }
+
+    fn sample(&mut self) -> Option<f32> {
+        None
+    }
+}
+
 #[cfg(target_os = "windows")]
 struct GpuSampler {
     query: isize,
@@ -387,7 +713,7 @@ impl GpuSampler {
 
             items.set_len(item_count as usize);
             let mut by_pid = HashMap::<u32, f32>::new();
-            let mut total = 0.0;
+            let mut total = 0.0_f32;
 
             for item in &items {
                 let item = item.assume_init_ref();
@@ -396,13 +722,12 @@ impl GpuSampler {
                     continue;
                 }
 
-                let percent = value as f32;
-                total += percent;
-
-                if let Some(pid) = parse_gpu_pid(item.name) {
-                    let entry = by_pid.entry(pid).or_insert(0.0);
-                    *entry = (*entry + percent).clamp(0.0, 100.0);
-                }
+                record_gpu_engine_usage(
+                    &mut by_pid,
+                    parse_gpu_pid(item.name),
+                    value as f32,
+                    &mut total,
+                );
             }
 
             GpuSample {
@@ -508,6 +833,12 @@ mod pdh {
             counter: *mut isize,
         ) -> i32;
         pub fn PdhCollectQueryData(query: isize) -> i32;
+        pub fn PdhGetFormattedCounterValue(
+            counter: isize,
+            format: u32,
+            type_: *mut u32,
+            value: *mut PdhFmtCountervalue,
+        ) -> i32;
         pub fn PdhGetFormattedCounterArrayW(
             counter: isize,
             format: u32,
@@ -516,6 +847,114 @@ mod pdh {
             item_buffer: *mut PdhFmtCountervalueItemW,
         ) -> i32;
         pub fn PdhCloseQuery(query: isize) -> i32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_usage_uses_available_memory() {
+        assert_eq!(memory_usage_percent(16_000, 4_000), 75.0);
+    }
+
+    #[test]
+    fn memory_usage_handles_zero_total() {
+        assert_eq!(memory_usage_percent(0, 0), 0.0);
+        assert_eq!(memory_share_percent(512, 0), 0.0);
+    }
+
+    #[test]
+    fn memory_usage_saturates_when_available_exceeds_total() {
+        assert_eq!(memory_usage_percent(8_000, 9_000), 0.0);
+    }
+
+    #[test]
+    fn gpu_engine_usage_uses_max_engine_not_sum() {
+        let mut by_pid = HashMap::new();
+        let mut total = 0.0;
+
+        record_gpu_engine_usage(&mut by_pid, Some(42), 35.0, &mut total);
+        record_gpu_engine_usage(&mut by_pid, Some(42), 18.0, &mut total);
+        record_gpu_engine_usage(&mut by_pid, Some(7), 64.0, &mut total);
+
+        assert_eq!(total, 64.0);
+        assert_eq!(by_pid.get(&42), Some(&35.0));
+        assert_eq!(by_pid.get(&7), Some(&64.0));
+    }
+
+    #[test]
+    fn resource_score_combines_weighted_usage_and_bottleneck() {
+        let score = resource_score(20.0, 40.0, 80.0);
+
+        assert!((score - 57.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn default_process_order_uses_resource_score() {
+        let mut processes = vec![
+            ProcessInfo {
+                name: "cpu-heavy".to_string(),
+                pid: 1,
+                cpu_percent: 40.0,
+                gpu_percent: 0.0,
+                memory_percent: 0.0,
+            },
+            ProcessInfo {
+                name: "balanced-heavy".to_string(),
+                pid: 2,
+                cpu_percent: 25.0,
+                gpu_percent: 30.0,
+                memory_percent: 35.0,
+            },
+        ];
+
+        processes.sort_by(compare_by_resource_score);
+
+        assert_eq!(processes[0].name, "balanced-heavy");
+    }
+
+    #[test]
+    fn appearance_config_sanitizes_invalid_values() {
+        let config = AppearanceConfig {
+            opacity: 255,
+            border_radius: 99,
+            theme_mode: "neon".to_string(),
+            accent_color: "red".to_string(),
+            font_size: "huge".to_string(),
+            background_blur: true,
+            animations: false,
+            window_shadow: true,
+        }
+        .sanitized();
+
+        assert_eq!(config.opacity, 100);
+        assert_eq!(config.border_radius, 32);
+        assert_eq!(config.theme_mode, "system");
+        assert_eq!(config.accent_color, "#7dd3fc");
+        assert_eq!(config.font_size, "medium");
+        assert!(config.background_blur);
+        assert!(!config.animations);
+        assert!(config.window_shadow);
+    }
+
+    #[test]
+    fn appearance_config_merges_partial_user_config_with_defaults() {
+        let config = appearance_config_from_json(r##"{"opacity":70,"accentColor":"#ff00aa"}"##);
+
+        assert_eq!(config.opacity, 70);
+        assert_eq!(config.accent_color, "#ff00aa");
+        assert_eq!(config.border_radius, 12);
+        assert_eq!(config.theme_mode, "system");
+        assert_eq!(config.font_size, "medium");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parse_gpu_pid_reads_pdh_instance_names() {
+        let mut name = wide(r"pid_1234_luid_0x00000000_0x00000000_phys_0_eng_0_engtype_3D");
+        assert_eq!(parse_gpu_pid(name.as_mut_ptr()), Some(1234));
     }
 }
 
@@ -541,7 +980,10 @@ fn main() {
             get_system_info,
             hide_main_window,
             get_window_opacity,
-            apply_window_opacity
+            apply_window_opacity,
+            get_appearance_config,
+            save_appearance_config,
+            reset_appearance_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

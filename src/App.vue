@@ -7,6 +7,13 @@ import {
   currentMonitor,
   getCurrentWindow
 } from '@tauri-apps/api/window'
+import {
+  applyAppearanceConfig,
+  cloneAppearanceConfig,
+  configsEqual,
+  defaultAppearanceConfig,
+  normalizeAppearanceConfig
+} from './appearance'
 
 const refreshInterval = 1000
 const dockRevealRatio = 0.1
@@ -19,7 +26,9 @@ let intervalId = null
 let leaveTimer = null
 let moveTimer = null
 let unlistenMoved = null
-let unlistenOpacity = null
+let unlistenAppearance = null
+let themeMediaQuery = null
+let themeChangeHandler = null
 let dockState = null
 const appWindow = getCurrentWindow()
 const viewMode = new URLSearchParams(window.location.search).get('mode') || 'monitor'
@@ -35,8 +44,9 @@ const topCpuProcesses = ref([])
 const topGpuProcesses = ref([])
 const topMemoryProcesses = ref([])
 const selectedMetric = ref(null)
-const opacityPercent = ref(92)
-const appliedOpacityPercent = ref(92)
+const appearanceDraft = ref(cloneAppearanceConfig(defaultAppearanceConfig))
+const savedAppearance = ref(cloneAppearanceConfig(defaultAppearanceConfig))
+const appearanceStatus = ref('')
 
 const displayedProcesses = computed(() => {
   if (selectedMetric.value === 'gpu') {
@@ -49,6 +59,8 @@ const displayedProcesses = computed(() => {
 
   return topCpuProcesses.value
 })
+
+const appearanceChanged = computed(() => !configsEqual(appearanceDraft.value, savedAppearance.value))
 
 async function fetchData() {
   try {
@@ -87,6 +99,18 @@ async function startDrag(event) {
   }
 }
 
+async function startResize(event, direction) {
+  if (event.button !== 0) {
+    return
+  }
+
+  try {
+    await appWindow.startResizeDragging(direction)
+  } catch (error) {
+    console.error('Failed to start resizing:', error)
+  }
+}
+
 async function closeWindow() {
   try {
     await invoke('hide_main_window')
@@ -95,37 +119,57 @@ async function closeWindow() {
   }
 }
 
-async function applyOpacity() {
+async function loadAppearance() {
   try {
-    const nextOpacity = await invoke('apply_window_opacity', {
-      opacityPercent: opacityPercent.value
-    })
-    setPanelOpacity(nextOpacity)
-    appliedOpacityPercent.value = nextOpacity
-    opacityPercent.value = nextOpacity
+    const config = normalizeAppearanceConfig(await invoke('get_appearance_config'))
+    savedAppearance.value = cloneAppearanceConfig(config)
+    appearanceDraft.value = cloneAppearanceConfig(config)
+    applyAppearanceConfig(config)
   } catch (error) {
-    console.error('Failed to apply opacity:', error)
+    console.error('Failed to load appearance config:', error)
+    applyAppearanceConfig(defaultAppearanceConfig)
   }
 }
 
-async function loadOpacity() {
+function updateAppearanceValue(key, value) {
+  appearanceStatus.value = ''
+  const next = normalizeAppearanceConfig({
+    ...appearanceDraft.value,
+    [key]: value
+  })
+
+  appearanceDraft.value = next
+  applyAppearanceConfig(next)
+}
+
+async function saveAppearance() {
   try {
-    const opacity = await invoke('get_window_opacity')
-    opacityPercent.value = opacity
-    appliedOpacityPercent.value = opacity
-    setPanelOpacity(opacity)
+    const config = normalizeAppearanceConfig(
+      await invoke('save_appearance_config', {
+        config: appearanceDraft.value
+      })
+    )
+    savedAppearance.value = cloneAppearanceConfig(config)
+    appearanceDraft.value = cloneAppearanceConfig(config)
+    applyAppearanceConfig(config)
+    appearanceStatus.value = '已保存'
   } catch (error) {
-    console.error('Failed to load opacity:', error)
+    console.error('Failed to save appearance config:', error)
+    appearanceStatus.value = '保存失败'
   }
 }
 
-function setPanelOpacity(percent) {
-  const opacity = clamp(Number(percent) / 100, 0.4, 1)
-  document.documentElement.style.setProperty('--panel-opacity', opacity.toFixed(2))
-}
-
-function updateOpacityFromInput(event) {
-  opacityPercent.value = clamp(Number(event.target.value) || 40, 40, 100)
+async function resetAppearance() {
+  try {
+    const config = normalizeAppearanceConfig(await invoke('reset_appearance_config'))
+    savedAppearance.value = cloneAppearanceConfig(config)
+    appearanceDraft.value = cloneAppearanceConfig(config)
+    applyAppearanceConfig(config)
+    appearanceStatus.value = '已恢复默认'
+  } catch (error) {
+    console.error('Failed to reset appearance config:', error)
+    appearanceStatus.value = '恢复失败'
+  }
 }
 
 async function closeSettingsWindow() {
@@ -322,21 +366,25 @@ function clamp(value, min, max) {
 }
 
 onMounted(async () => {
+  await loadAppearance()
+  themeMediaQuery = window.matchMedia?.('(prefers-color-scheme: light)')
+  themeChangeHandler = () => {
+    if (appearanceDraft.value.themeMode === 'system') {
+      applyAppearanceConfig(appearanceDraft.value)
+    }
+  }
+  themeMediaQuery?.addEventListener?.('change', themeChangeHandler)
+  unlistenAppearance = await listen('appearance-changed', (event) => {
+    const config = normalizeAppearanceConfig(event.payload)
+    savedAppearance.value = cloneAppearanceConfig(config)
+    appearanceDraft.value = cloneAppearanceConfig(config)
+    applyAppearanceConfig(config)
+  })
+
   if (isMonitorView) {
-    await loadOpacity()
-    unlistenOpacity = await listen('opacity-changed', (event) => {
-      const opacity = Number(event.payload)
-      opacityPercent.value = opacity
-      appliedOpacityPercent.value = opacity
-      setPanelOpacity(opacity)
-    })
     fetchData()
     intervalId = setInterval(fetchData, refreshInterval)
     unlistenMoved = await appWindow.onMoved(scheduleDockEvaluation)
-  }
-
-  if (isSettingsView) {
-    await loadOpacity()
   }
 })
 
@@ -349,9 +397,12 @@ onUnmounted(() => {
   if (unlistenMoved) {
     unlistenMoved()
   }
-  if (unlistenOpacity) {
-    unlistenOpacity()
+  if (unlistenAppearance) {
+    unlistenAppearance()
   }
+  themeMediaQuery?.removeEventListener?.('change', themeChangeHandler)
+  themeMediaQuery = null
+  themeChangeHandler = null
 })
 </script>
 
@@ -412,9 +463,17 @@ onUnmounted(() => {
   <main
     v-else-if="isSettingsView"
     class="settings-panel"
-    @pointerdown="startDrag"
   >
-    <header class="settings-header">
+    <div class="resize-edge resize-edge-top" @mousedown.stop.prevent="startResize($event, 'North')"></div>
+    <div class="resize-edge resize-edge-right" @mousedown.stop.prevent="startResize($event, 'East')"></div>
+    <div class="resize-edge resize-edge-bottom" @mousedown.stop.prevent="startResize($event, 'South')"></div>
+    <div class="resize-edge resize-edge-left" @mousedown.stop.prevent="startResize($event, 'West')"></div>
+    <div class="resize-corner resize-corner-top-left" @mousedown.stop.prevent="startResize($event, 'NorthWest')"></div>
+    <div class="resize-corner resize-corner-top-right" @mousedown.stop.prevent="startResize($event, 'NorthEast')"></div>
+    <div class="resize-corner resize-corner-bottom-right" @mousedown.stop.prevent="startResize($event, 'SouthEast')"></div>
+    <div class="resize-corner resize-corner-bottom-left" @mousedown.stop.prevent="startResize($event, 'SouthWest')"></div>
+
+    <header class="settings-header" @pointerdown="startDrag">
       <div>
         <h1>设置</h1>
       </div>
@@ -424,41 +483,88 @@ onUnmounted(() => {
     </header>
 
     <div class="settings-content">
-      <p class="settings-description">调整监控窗口不透明度</p>
+      <p class="settings-description">调整主窗口和设置窗口的外观，所有修改都会实时预览。</p>
 
-      <section class="opacity-control">
-        <div class="opacity-label-row">
-          <span>不透明度</span>
-          <strong>{{ opacityPercent }}%</strong>
-        </div>
-        <input
-          class="opacity-slider interactive"
-          type="range"
-          min="40"
-          max="100"
-          step="1"
-          :value="opacityPercent"
-          @input="updateOpacityFromInput"
-        >
-        <div class="opacity-input-row">
+      <section class="settings-section">
+        <h2>样式设置</h2>
+
+        <div class="setting-row vertical">
+          <div class="setting-label-row">
+            <span>窗口不透明度</span>
+            <strong>{{ appearanceDraft.opacity }}%</strong>
+          </div>
           <input
-            class="opacity-number interactive"
-            type="number"
+            class="setting-slider interactive"
+            type="range"
             min="40"
             max="100"
             step="1"
-            :value="opacityPercent"
-            @input="updateOpacityFromInput"
+            :value="appearanceDraft.opacity"
+            @input="updateAppearanceValue('opacity', $event.target.value)"
           >
-          <span>%</span>
         </div>
+
+        <div class="setting-row vertical">
+          <div class="setting-label-row">
+            <span>圆角大小</span>
+            <strong>{{ appearanceDraft.borderRadius }}px</strong>
+          </div>
+          <input
+            class="setting-slider interactive"
+            type="range"
+            min="0"
+            max="32"
+            step="1"
+            :value="appearanceDraft.borderRadius"
+            @input="updateAppearanceValue('borderRadius', $event.target.value)"
+          >
+        </div>
+
+        <div class="setting-row">
+          <span>主题模式</span>
+          <div class="segmented-control">
+            <button class="segmented-button interactive" :class="{ selected: appearanceDraft.themeMode === 'system' }" type="button" @pointerdown.stop @click.stop="updateAppearanceValue('themeMode', 'system')">跟随系统</button>
+            <button class="segmented-button interactive" :class="{ selected: appearanceDraft.themeMode === 'light' }" type="button" @pointerdown.stop @click.stop="updateAppearanceValue('themeMode', 'light')">浅色</button>
+            <button class="segmented-button interactive" :class="{ selected: appearanceDraft.themeMode === 'dark' }" type="button" @pointerdown.stop @click.stop="updateAppearanceValue('themeMode', 'dark')">深色</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <span>主题色</span>
+          <input class="color-input interactive" type="color" :value="appearanceDraft.accentColor" @input="updateAppearanceValue('accentColor', $event.target.value)">
+        </div>
+
+        <div class="setting-row">
+          <span>字体大小</span>
+          <div class="segmented-control compact">
+            <button class="segmented-button interactive" :class="{ selected: appearanceDraft.fontSize === 'small' }" type="button" @pointerdown.stop @click.stop="updateAppearanceValue('fontSize', 'small')">小</button>
+            <button class="segmented-button interactive" :class="{ selected: appearanceDraft.fontSize === 'medium' }" type="button" @pointerdown.stop @click.stop="updateAppearanceValue('fontSize', 'medium')">中</button>
+            <button class="segmented-button interactive" :class="{ selected: appearanceDraft.fontSize === 'large' }" type="button" @pointerdown.stop @click.stop="updateAppearanceValue('fontSize', 'large')">大</button>
+          </div>
+        </div>
+
+        <label class="setting-toggle">
+          <span>背景模糊</span>
+          <input class="interactive" type="checkbox" :checked="appearanceDraft.backgroundBlur" @change="updateAppearanceValue('backgroundBlur', $event.target.checked)">
+        </label>
+
+        <label class="setting-toggle">
+          <span>动画效果</span>
+          <input class="interactive" type="checkbox" :checked="appearanceDraft.animations" @change="updateAppearanceValue('animations', $event.target.checked)">
+        </label>
+
+        <label class="setting-toggle">
+          <span>窗口阴影</span>
+          <input class="interactive" type="checkbox" :checked="appearanceDraft.windowShadow" @change="updateAppearanceValue('windowShadow', $event.target.checked)">
+        </label>
       </section>
 
       <footer class="settings-actions">
-        <span class="settings-status">当前 {{ appliedOpacityPercent }}%</span>
-        <button class="apply-button interactive" type="button" @pointerdown.stop @pointerup.stop.prevent="applyOpacity">
-          应用
-        </button>
+        <span class="settings-status">{{ appearanceStatus || (appearanceChanged ? '未保存' : '已同步') }}</span>
+        <div class="settings-action-buttons">
+          <button class="secondary-button interactive" type="button" @pointerdown.stop @click.stop="resetAppearance">恢复默认设置</button>
+          <button class="apply-button interactive" type="button" :disabled="!appearanceChanged" @pointerdown.stop @click.stop="saveAppearance">保存</button>
+        </div>
       </footer>
     </div>
   </main>
