@@ -1,179 +1,184 @@
-# Resource Monitor - Windows Desktop Application
+# Resource Monitor
 
-A Windows desktop application built with Tauri + Vue 3 for monitoring system resources (CPU, memory, disk usage).
+Resource Monitor is a Windows-first desktop resource monitor built with Tauri 2 and Vue 3.
+It runs as a small always-on-top floating window and stays available from the native Windows
+system tray.
 
-## Prerequisites
+The app is not Electron. It uses Tauri native window, command, event, and tray APIs.
 
-Before running this project, ensure you have the following installed:
+## Features
 
-### Required Software
+- Floating frameless monitor window with a transparent Tauri shell and rounded in-app panel.
+- CPU, GPU, and memory usage display.
+- Top process list sorted by CPU, GPU, or memory.
+- Click CPU, GPU, or Memory to switch the process sort metric.
+- Docking and collapse behavior for the monitor window.
+- Native Windows system tray menu.
+- Settings window for opacity control.
+- Close buttons hide windows to the tray; only the tray `Quit` action exits the app.
+
+## Tech Stack
+
+| Area | Technology |
+| --- | --- |
+| Frontend | Vue 3 Composition API, Vite 8, `@tauri-apps/api` 2.x |
+| Desktop shell | Rust 2021, Tauri 2.x |
+| System data | `sysinfo` for CPU, memory, and processes |
+| GPU data | Windows PDH GPU Engine counters |
+| Async runtime | Tokio |
+
+## Requirements
 
 | Software | Version | Purpose |
-|----------|---------|---------|
-| **Node.js** | v18+ | JavaScript runtime for frontend build |
-| **npm** | v9+ | Package manager (comes with Node.js) |
-| **Rust** | 1.70+ | Rust programming language |
-| **Cargo** | (comes with Rust) | Rust package manager |
+| --- | --- | --- |
+| Node.js | 18+ | Frontend tooling |
+| npm | 9+ | JavaScript package manager |
+| Rust | Stable MSVC toolchain | Tauri backend build |
+| Microsoft Edge WebView2 Runtime | Current | Required by Tauri WebView on Windows |
 
-### Optional: Tauri CLI
-
-For development, you can use the Tauri CLI directly:
+## Install Dependencies
 
 ```powershell
-# Install Tauri CLI globally
-npm install -g @tauri-apps/cli
-
-# Or use it via npx (no install required)
-npx tauri dev
-```
-
-## Installation
-
-### 1. Clone and Install Dependencies
-
-```powershell
-# Navigate to project directory
-cd D:\rust_program\resource-monitor
-
-# Install npm dependencies
 npm install
 ```
 
-### 2. Verify Rust Installation
+## Development
+
+Run the Tauri development app from the repository root:
 
 ```powershell
-# Check Rust version
-rustc --version
-cargo --version
-```
-
-## Running in Development Mode
-
-### Option A: Using npm scripts (recommended)
-
-```powershell
-# Run Vue frontend in dev mode
-npm run dev
-
-# In a separate terminal, run Tauri dev
 npm run tauri dev
 ```
 
-### Option B: Using Tauri CLI directly
+The Tauri config starts the Vite dev server automatically through `beforeDevCommand`.
+
+You can also run only the frontend during UI work:
 
 ```powershell
-# Start the complete Tauri development server
-npx tauri dev
-```
-
-### Option C: Using Vite + Tauri concurrently
-
-```powershell
-# Terminal 1: Start Vue dev server
 npm run dev
-
-# Terminal 2: Start Tauri
-npx tauri dev
 ```
 
-## Building for Windows
+## Build
 
-### Development Build (faster, not optimized)
-
-```powershell
-npm run tauri build
-```
-
-### Production Build
+Build the frontend:
 
 ```powershell
-# Full production build
 npm run build
+```
+
+Check the Rust/Tauri backend:
+
+```powershell
+cd src-tauri
+cargo check
+cd ..
+```
+
+Build the release executable:
+
+```powershell
 npm run tauri build
 ```
 
-The executable will be located at:
-```
+The optimized executable is created at:
+
+```text
 src-tauri/target/release/resource-monitor.exe
 ```
 
+Current `src-tauri/tauri.conf.json` has `bundle.active` set to `false`, so `npm run tauri build`
+creates a portable executable instead of an installer bundle.
+
+## Release Package
+
+Release-ready files are collected in the root `release/` folder:
+
+```text
+release/
+|-- resource-monitor-v0.1.0-windows-x64/
+|   |-- resource-monitor.exe
+|   |-- WebView2Loader.dll
+|   |-- README.md
+|   |-- LICENSE
+|   `-- RELEASE_NOTES.md
+|-- resource-monitor-v0.1.0-windows-x64.zip
+|-- RELEASE_NOTES_v0.1.0.md
+`-- SHA256SUMS.txt
+```
+
+For GitHub Releases, upload:
+
+- `release/resource-monitor-v0.1.0-windows-x64.zip`
+- `release/SHA256SUMS.txt`
+- `release/RELEASE_NOTES_v0.1.0.md`
+
+Users can extract the zip and run `resource-monitor.exe`.
+
+## Runtime Views
+
+The app uses one Vue bundle and switches views through the URL query:
+
+- default route: monitor window
+- `index.html?mode=settings`: settings window
+
+The settings window is created or reused by the Rust `show_settings` command.
+
+## System Tray
+
+The tray menu is implemented with Tauri 2 native `TrayIconBuilder` and `Menu` APIs.
+It is intentionally not rendered as a Vue/WebView popup.
+
+Current tray actions:
+
+- Show main window
+- Settings
+- Auto start checkbox
+- Notifications checkbox
+- Quit
+
+Only `Quit` exits the process. Closing or hiding app windows keeps the tray process alive.
+
 ## Project Structure
 
-```
+```text
 resource-monitor/
-├── src/                    # Vue frontend source
-│   ├── components/         # Vue components
-│   ├── App.vue             # Main Vue application
-│   └── main.js             # Vue entry point
-├── src-tauri/              # Rust/Tauri backend
-│   ├── src/
-│   │   └── main.rs         # Rust entry point
-│   ├── Cargo.toml          # Rust dependencies
-│   ├── tauri.conf.json     # Tauri configuration
-│   └── build.rs            # Build script
-├── public/                 # Static assets
-├── scripts/
-│   └── build.ps1          # Windows build script
-├── package.json            # Node.js dependencies
-├── vite.config.js         # Vite configuration
-└── README.md              # This file
+|-- src/
+|   |-- App.vue
+|   |-- main.js
+|   |-- style.css
+|   |-- appearance.js
+|   |-- percentFormat.js
+|   |-- processMenuState.js
+|   `-- components/
+|-- src-tauri/
+|   |-- src/main.rs
+|   |-- capabilities/default.json
+|   |-- icons/
+|   |-- Cargo.toml
+|   `-- tauri.conf.json
+|-- public/
+|-- release/
+|-- package.json
+|-- vite.config.js
+`-- README.md
 ```
-
-## Dependencies Explanation
-
-### Frontend (Node.js)
-
-| Package | Purpose |
-|---------|---------|
-| **vue** | Vue 3 reactive framework |
-| **@vitejs/plugin-vue** | Vite plugin for Vue SFC support |
-| **vite** | Next-generation frontend build tool |
-
-### Backend (Rust)
-
-| Crate | Purpose |
-|-------|---------|
-| **tauri** | Desktop app framework |
-| **serde** | Serialization/deserialization |
-| **serde_json** | JSON support |
-| **sysinfo** | System information (CPU, memory, disk) |
-| **tokio** | Async runtime |
 
 ## Troubleshooting
 
-### Rust Issues
+If `npm run tauri build` fails because `resource-monitor.exe` is locked, stop the running app
+process and rebuild:
 
 ```powershell
-# Update Rust to latest version
-rustup update
-
-# Verify Rust is properly installed
-rustc --version
+Get-Process resource-monitor -ErrorAction SilentlyContinue
+Stop-Process -Name resource-monitor -Force
+npm run tauri build
 ```
 
-### Node.js Issues
+If the portable release cannot start on another Windows machine, install or repair the Microsoft
+Edge WebView2 Runtime.
 
-```powershell
-# Clear npm cache if you have issues
-npm cache clean --force
+## References
 
-# Reinstall dependencies
-rm -rf node_modules
-npm install
-```
-
-### Tauri Build Issues
-
-```powershell
-# Install required Windows build tools
-rustup target add x86_64-pc-windows-msvc
-
-# If you see linking errors, install Visual Studio Build Tools
-# or ensure you have the Windows SDK installed
-```
-
-## Additional Resources
-
-- [Tauri Documentation](https://tauri.app/v1/guides/)
+- [Tauri 2 Documentation](https://v2.tauri.app/)
 - [Vue 3 Documentation](https://vuejs.org/guide/)
-- [Vite Documentation](https://vitejs.dev/guide/)
+- [Vite Documentation](https://vite.dev/guide/)
