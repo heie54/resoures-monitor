@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use sysinfo::{CpuExt, PidExt, ProcessExt, System, SystemExt};
 use tauri::image::Image;
@@ -154,6 +155,46 @@ fn reset_appearance_config(app: AppHandle) -> Result<AppearanceConfig, String> {
     write_appearance_config(&app, &config)?;
     let _ = app.emit("appearance-changed", config.clone());
     Ok(config)
+}
+
+#[tauri::command]
+fn terminate_process(pid: u32) -> Result<(), String> {
+    validate_process_action_pid(pid)?;
+
+    let mut system = System::new_all();
+    system.refresh_processes();
+    let process = system
+        .process(sysinfo::Pid::from_u32(pid))
+        .ok_or_else(|| format!("进程 {pid} 已不存在"))?;
+    let name = process.name().to_string();
+
+    if process.kill() {
+        Ok(())
+    } else {
+        Err(format!("无法结束进程 {name} ({pid})，可能需要管理员权限"))
+    }
+}
+
+#[tauri::command]
+fn open_process_location(pid: u32) -> Result<(), String> {
+    validate_pid(pid)?;
+
+    let mut system = System::new_all();
+    system.refresh_processes();
+    let process = system
+        .process(sysinfo::Pid::from_u32(pid))
+        .ok_or_else(|| format!("进程 {pid} 已不存在"))?;
+    let exe = process.exe();
+
+    if exe.as_os_str().is_empty() {
+        return Err(format!("进程 {pid} 未提供可执行文件路径"));
+    }
+
+    Command::new("explorer")
+        .arg(explorer_select_arg(exe))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开文件所在位置: {e}"))
 }
 
 #[tauri::command]
@@ -507,19 +548,54 @@ fn compare_by_resource_score(a: &ProcessInfo, b: &ProcessInfo) -> std::cmp::Orde
         })
 }
 
+fn validate_pid(pid: u32) -> Result<(), String> {
+    if pid == 0 {
+        Err("无效的进程 ID".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_process_action_pid(pid: u32) -> Result<(), String> {
+    validate_pid(pid)?;
+
+    if pid == std::process::id() {
+        Err("不能结束 Resource Monitor 自身进程".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn explorer_select_arg(path: &Path) -> String {
+    format!("/select,{}", path.display())
+}
+
 fn record_gpu_engine_usage(
     by_pid: &mut HashMap<u32, f32>,
+    by_engine: &mut HashMap<String, f32>,
     pid: Option<u32>,
+    engine_key: Option<String>,
     percent: f32,
-    total: &mut f32,
 ) {
     let percent = percent.clamp(0.0, 100.0);
-    *total = (*total).max(percent);
 
     if let Some(pid) = pid {
         let entry = by_pid.entry(pid).or_insert(0.0);
         *entry = (*entry).max(percent);
     }
+
+    if let Some(engine_key) = engine_key {
+        let entry = by_engine.entry(engine_key).or_insert(0.0);
+        *entry = (*entry + percent).clamp(0.0, 100.0);
+    }
+}
+
+fn gpu_total_from_engines(by_engine: &HashMap<String, f32>) -> f32 {
+    by_engine
+        .values()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .clamp(0.0, 100.0)
 }
 
 #[cfg(target_os = "windows")]
@@ -550,12 +626,8 @@ impl CpuSampler {
 
             for path in paths {
                 let path = wide(path);
-                if pdh::PdhAddEnglishCounterW(
-                    sampler.query,
-                    path.as_ptr(),
-                    0,
-                    &mut sampler.counter,
-                ) == pdh::ERROR_SUCCESS
+                if pdh::PdhAddEnglishCounterW(sampler.query, path.as_ptr(), 0, &mut sampler.counter)
+                    == pdh::ERROR_SUCCESS
                 {
                     sampler.available =
                         pdh::PdhCollectQueryData(sampler.query) == pdh::ERROR_SUCCESS;
@@ -713,7 +785,7 @@ impl GpuSampler {
 
             items.set_len(item_count as usize);
             let mut by_pid = HashMap::<u32, f32>::new();
-            let mut total = 0.0_f32;
+            let mut by_engine = HashMap::<String, f32>::new();
 
             for item in &items {
                 let item = item.assume_init_ref();
@@ -724,14 +796,15 @@ impl GpuSampler {
 
                 record_gpu_engine_usage(
                     &mut by_pid,
+                    &mut by_engine,
                     parse_gpu_pid(item.name),
+                    parse_gpu_engine_key(item.name),
                     value as f32,
-                    &mut total,
                 );
             }
 
             GpuSample {
-                total: total.clamp(0.0, 100.0),
+                total: gpu_total_from_engines(&by_engine),
                 by_pid,
             }
         }
@@ -777,6 +850,23 @@ fn parse_gpu_pid(name: *mut u16) -> Option<u32> {
         .take_while(|ch| ch.is_ascii_digit())
         .collect::<String>();
     digits.parse().ok()
+}
+
+#[cfg(target_os = "windows")]
+fn parse_gpu_engine_key(name: *mut u16) -> Option<String> {
+    gpu_engine_key_from_instance_name(&wide_ptr_to_string(name)?)
+}
+
+fn gpu_engine_key_from_instance_name(name: &str) -> Option<String> {
+    let start = name.find("pid_")? + 4;
+    let engine_start = name[start..].find('_')? + start + 1;
+    let key = name[engine_start..].trim();
+
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -871,17 +961,75 @@ mod tests {
     }
 
     #[test]
-    fn gpu_engine_usage_uses_max_engine_not_sum() {
+    fn gpu_engine_usage_sums_processes_per_engine_like_task_manager() {
         let mut by_pid = HashMap::new();
-        let mut total = 0.0;
+        let mut by_engine = HashMap::new();
 
-        record_gpu_engine_usage(&mut by_pid, Some(42), 35.0, &mut total);
-        record_gpu_engine_usage(&mut by_pid, Some(42), 18.0, &mut total);
-        record_gpu_engine_usage(&mut by_pid, Some(7), 64.0, &mut total);
+        record_gpu_engine_usage(
+            &mut by_pid,
+            &mut by_engine,
+            Some(42),
+            Some("luid_a_phys_0_eng_0_engtype_3D".to_string()),
+            35.0,
+        );
+        record_gpu_engine_usage(
+            &mut by_pid,
+            &mut by_engine,
+            Some(7),
+            Some("luid_a_phys_0_eng_0_engtype_3D".to_string()),
+            18.0,
+        );
+        record_gpu_engine_usage(
+            &mut by_pid,
+            &mut by_engine,
+            Some(9),
+            Some("luid_a_phys_0_eng_1_engtype_Copy".to_string()),
+            64.0,
+        );
 
-        assert_eq!(total, 64.0);
+        assert_eq!(gpu_total_from_engines(&by_engine), 64.0);
         assert_eq!(by_pid.get(&42), Some(&35.0));
-        assert_eq!(by_pid.get(&7), Some(&64.0));
+        assert_eq!(by_pid.get(&7), Some(&18.0));
+    }
+
+    #[test]
+    fn gpu_engine_usage_clamps_engine_sums_to_one_hundred() {
+        let mut by_pid = HashMap::new();
+        let mut by_engine = HashMap::new();
+
+        record_gpu_engine_usage(
+            &mut by_pid,
+            &mut by_engine,
+            Some(42),
+            Some("luid_a_phys_0_eng_0_engtype_3D".to_string()),
+            70.0,
+        );
+        record_gpu_engine_usage(
+            &mut by_pid,
+            &mut by_engine,
+            Some(7),
+            Some("luid_a_phys_0_eng_0_engtype_3D".to_string()),
+            45.0,
+        );
+
+        assert_eq!(gpu_total_from_engines(&by_engine), 100.0);
+    }
+
+    #[test]
+    fn process_action_rejects_current_process_pid() {
+        let current_pid = std::process::id();
+
+        assert!(validate_process_action_pid(current_pid).is_err());
+    }
+
+    #[test]
+    fn explorer_select_arg_includes_target_path() {
+        let path = PathBuf::from(r"C:\Program Files\App\app.exe");
+
+        assert_eq!(
+            explorer_select_arg(&path),
+            r"/select,C:\Program Files\App\app.exe"
+        );
     }
 
     #[test]
@@ -983,7 +1131,9 @@ fn main() {
             apply_window_opacity,
             get_appearance_config,
             save_appearance_config,
-            reset_appearance_config
+            reset_appearance_config,
+            terminate_process,
+            open_process_location
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

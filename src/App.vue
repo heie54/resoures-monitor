@@ -14,6 +14,11 @@ import {
   defaultAppearanceConfig,
   normalizeAppearanceConfig
 } from './appearance'
+import {
+  closeProcessMenuState,
+  createClosedProcessMenuState
+} from './processMenuState'
+import { formatProcessPercent, formatTotalPercent } from './percentFormat'
 
 const refreshInterval = 1000
 const dockRevealRatio = 0.1
@@ -44,11 +49,17 @@ const topCpuProcesses = ref([])
 const topGpuProcesses = ref([])
 const topMemoryProcesses = ref([])
 const selectedMetric = ref(null)
+const frozenProcesses = ref(null)
+const processMenu = ref(createClosedProcessMenuState())
 const appearanceDraft = ref(cloneAppearanceConfig(defaultAppearanceConfig))
 const savedAppearance = ref(cloneAppearanceConfig(defaultAppearanceConfig))
 const appearanceStatus = ref('')
 
 const displayedProcesses = computed(() => {
+  if (frozenProcesses.value) {
+    return frozenProcesses.value
+  }
+
   if (selectedMetric.value === 'gpu') {
     return topGpuProcesses.value
   }
@@ -61,6 +72,7 @@ const displayedProcesses = computed(() => {
 })
 
 const appearanceChanged = computed(() => !configsEqual(appearanceDraft.value, savedAppearance.value))
+const contextProcessPid = computed(() => processMenu.value.process?.pid ?? null)
 
 async function fetchData() {
   try {
@@ -76,15 +88,105 @@ async function fetchData() {
   }
 }
 
-function formatPercent(value) {
-  return Math.round(value)
-}
-
 function toggleMetric(metric) {
+  closeProcessMenu()
   selectedMetric.value = selectedMetric.value === metric ? null : metric
 }
 
+function openProcessMenu(event, proc) {
+  event.preventDefault()
+  event.stopPropagation()
+  clearLeaveTimer()
+
+  const snapshot = displayedProcesses.value.map((process) => ({ ...process }))
+  const selectedProcess = snapshot.find((process) => process.pid === proc.pid) ?? { ...proc }
+  const menuWidth = 154
+  const menuHeight = 76
+
+  frozenProcesses.value = snapshot
+  processMenu.value = {
+    visible: true,
+    x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth - 8)),
+    y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight - 8)),
+    process: selectedProcess,
+    busy: false,
+    message: ''
+  }
+}
+
+function closeProcessMenu(options = {}) {
+  const nextMenu = closeProcessMenuState(processMenu.value, options)
+  if (nextMenu === processMenu.value) {
+    return
+  }
+
+  processMenu.value = nextMenu
+  frozenProcesses.value = null
+}
+
+function handleEscape(event) {
+  if (event.key === 'Escape') {
+    closeProcessMenu()
+  }
+}
+
+async function terminateSelectedProcess() {
+  const proc = processMenu.value.process
+  if (!proc || processMenu.value.busy) {
+    return
+  }
+
+  const confirmed = window.confirm(`结束进程 "${proc.name}" (PID ${proc.pid})？`)
+  if (!confirmed) {
+    return
+  }
+
+  processMenu.value = { ...processMenu.value, busy: true, message: '正在结束进程...' }
+
+  try {
+    await invoke('terminate_process', { pid: proc.pid })
+    processMenu.value = { ...processMenu.value, busy: false, message: '已请求结束进程' }
+    window.setTimeout(() => {
+      closeProcessMenu()
+      fetchData()
+    }, 300)
+  } catch (error) {
+    console.error('Failed to terminate process:', error)
+    processMenu.value = {
+      ...processMenu.value,
+      busy: false,
+      message: String(error)
+    }
+  }
+}
+
+async function openSelectedProcessLocation() {
+  const proc = processMenu.value.process
+  if (!proc || processMenu.value.busy) {
+    return
+  }
+
+  processMenu.value = { ...processMenu.value, busy: true, message: '正在打开位置...' }
+
+  try {
+    await invoke('open_process_location', { pid: proc.pid })
+    closeProcessMenu({ force: true })
+  } catch (error) {
+    console.error('Failed to open process location:', error)
+    processMenu.value = {
+      ...processMenu.value,
+      busy: false,
+      message: String(error)
+    }
+  }
+}
+
 async function startDrag(event) {
+  if (event.button === 0 && processMenu.value.visible) {
+    closeProcessMenu()
+    return
+  }
+
   if (event.button !== 0 || event.target.closest('.interactive')) {
     return
   }
@@ -385,6 +487,7 @@ onMounted(async () => {
     fetchData()
     intervalId = setInterval(fetchData, refreshInterval)
     unlistenMoved = await appWindow.onMoved(scheduleDockEvaluation)
+    window.addEventListener('keydown', handleEscape)
   }
 })
 
@@ -400,6 +503,7 @@ onUnmounted(() => {
   if (unlistenAppearance) {
     unlistenAppearance()
   }
+  window.removeEventListener('keydown', handleEscape)
   themeMediaQuery?.removeEventListener?.('change', themeChangeHandler)
   themeMediaQuery = null
   themeChangeHandler = null
@@ -413,6 +517,7 @@ onUnmounted(() => {
     @pointerdown="startDrag"
     @pointerenter="expandFromEdge"
     @pointerleave="scheduleCollapse"
+    @click="closeProcessMenu"
   >
     <button class="close-button interactive" type="button" aria-label="Close" @pointerdown.stop @click.stop="closeWindow">
       x
@@ -425,7 +530,7 @@ onUnmounted(() => {
         @pointerdown.stop
         @click.stop="toggleMetric('cpu')"
       >
-        CPU:{{ formatPercent(cpuUsage) }}%
+        CPU:{{ formatTotalPercent(cpuUsage) }}%
       </button>
       <button
         class="usage-button interactive"
@@ -434,7 +539,7 @@ onUnmounted(() => {
         @pointerdown.stop
         @click.stop="toggleMetric('gpu')"
       >
-        GPU:{{ formatPercent(gpuUsage) }}%
+        GPU:{{ formatTotalPercent(gpuUsage) }}%
       </button>
       <button
         class="usage-button interactive"
@@ -443,20 +548,37 @@ onUnmounted(() => {
         @pointerdown.stop
         @click.stop="toggleMetric('memory')"
       >
-        Memory:{{ formatPercent(memoryUsage) }}%
+        Memory:{{ formatTotalPercent(memoryUsage) }}%
       </button>
     </div>
-    <div class="process-list">
+    <div class="process-list interactive">
       <div
         v-for="proc in displayedProcesses"
         :key="`${selectedMetric || 'default'}-${proc.pid}`"
         class="process-row"
+        :class="{ focused: contextProcessPid === proc.pid }"
+        @contextmenu="openProcessMenu($event, proc)"
       >
         <span class="process-name">{{ proc.name }}</span>
-        <span class="process-usage">CPU:{{ formatPercent(proc.cpu_percent) }}%</span>
-        <span class="process-usage">GPU:{{ formatPercent(proc.gpu_percent) }}%</span>
-        <span class="process-usage">MEM:{{ formatPercent(proc.memory_percent) }}%</span>
+        <span class="process-usage">CPU:{{ formatProcessPercent(proc.cpu_percent) }}%</span>
+        <span class="process-usage">GPU:{{ formatProcessPercent(proc.gpu_percent) }}%</span>
+        <span class="process-usage">MEM:{{ formatProcessPercent(proc.memory_percent) }}%</span>
       </div>
+    </div>
+    <div
+      v-if="processMenu.visible"
+      class="process-context-menu interactive"
+      :style="{ left: `${processMenu.x}px`, top: `${processMenu.y}px` }"
+      @pointerdown.stop
+      @contextmenu.prevent.stop
+    >
+      <button type="button" class="context-menu-item danger" :disabled="processMenu.busy" @click="terminateSelectedProcess">
+        结束进程
+      </button>
+      <button type="button" class="context-menu-item" :disabled="processMenu.busy" @click="openSelectedProcessLocation">
+        打开文件所在位置
+      </button>
+      <p v-if="processMenu.message" class="context-menu-message">{{ processMenu.message }}</p>
     </div>
   </main>
 
